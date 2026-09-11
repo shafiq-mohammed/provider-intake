@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Request, UploadFile
@@ -20,6 +22,7 @@ from app.repository import DocumentRepository, StoredDocument
 from app.settings import Settings
 from app.text_extraction import extract_text
 from app.uploads import validate_upload
+from app.validation import validate_result
 
 router = APIRouter()
 
@@ -82,6 +85,7 @@ async def extract_document_fields(request: Request, document_id: str) -> Extract
     settings: Settings = request.app.state.settings
     engine: OcrEngine = request.app.state.ocr_engine
     extractor: FieldExtractor = request.app.state.field_extractor
+    clock: Callable[[], date] = request.app.state.clock
 
     document = _require_document(request, document_id)
     extraction = _extract_text_or_422(
@@ -94,10 +98,14 @@ async def extract_document_fields(request: Request, document_id: str) -> Extract
     else:
         result = _extract_fields_or_422(extractor, extraction.text)
 
+    # Deterministic normalization and downgrade-only validation (SPEC A8, T-005). The
+    # ``no_text`` result passes through too: with nothing ``found`` it is a no-op.
+    validated = validate_result(result, today=clock())
+
     return ExtractionResponse(
         document_id=document.id,
         text_source=extraction.source,
-        **result.fields(),
+        **validated.fields(),
     )
 
 

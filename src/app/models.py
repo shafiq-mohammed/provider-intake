@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 FIELD_NAMES: tuple[str, ...] = ("provider_name", "license_number", "state", "expiration_date")
 
@@ -50,7 +50,13 @@ _STATUS_RANKS: dict[FieldStatus, int] = {
 
 
 class FieldResult(BaseModel):
-    """One extracted field: its value, how certain that value is, and why."""
+    """One extracted field: its value, how certain that value is, and why.
+
+    Frozen: the A8 invariant below is enforced at construction, so no later assignment may
+    put a value back on a non-``found`` field. Validation builds new instances (T-005).
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     value: str | None = None
     status: FieldStatus
@@ -62,10 +68,12 @@ class FieldResult(BaseModel):
         """Force ``value`` to ``None`` whenever the status is not ``found`` (SPEC A8).
 
         A value attached to an uncertain field is dropped, never rejected, so a
-        misbehaving extractor cannot put it on the wire.
+        misbehaving extractor cannot put it on the wire. The model is frozen, so this last
+        write during construction goes through ``object.__setattr__``; every later write
+        is refused.
         """
         if self.status is not FieldStatus.FOUND and self.value is not None:
-            self.value = None
+            object.__setattr__(self, "value", None)
         return self
 
 
