@@ -5,6 +5,7 @@ because it reads the process environment (SPEC A13 / section 10). The repository
 so each test owns its storage. No network, no API key.
 """
 
+import json
 from typing import Any
 
 import pytest
@@ -22,6 +23,11 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_BYTES = PNG_SIGNATURE + b"\x00" * 32
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 PDF_BYTES = b"%PDF-1.4\n" + b"%" * 32
+
+# A marker that cannot occur incidentally in an error envelope; used to prove that uploaded
+# document bytes are never echoed back to the client (SPEC A17 / section 5).
+SECRET_MARKER = "SECRETPAYLOADMARKER"
+SECRET_PNG_BYTES = PNG_SIGNATURE + SECRET_MARKER.encode() + b"A" * 40
 
 ALLOWED = ["application/pdf", "image/jpeg", "image/png"]
 
@@ -66,6 +72,13 @@ def assert_envelope(body: Any, *, code: str, details: dict[str, Any] | None = No
     assert isinstance(error["details"], dict)
     if details is not None:
         assert error["details"] == details
+
+
+def assert_no_payload_leak(response: Any, marker: str) -> None:
+    """Assert the marker appears nowhere in the response, in any encoding of the body."""
+    assert marker not in response.text
+    assert marker.encode() not in response.content
+    assert marker not in json.dumps(response.json())
 
 
 # --------------------------------------------------------------------------- AC1
@@ -274,6 +287,69 @@ def test_ac4_validate_upload_raises_api_error_for_empty_content() -> None:
     assert excinfo.value.status_code == 400
     assert excinfo.value.code == "empty_file"
     assert excinfo.value.details == {}
+
+
+# AC4 / SPEC A17: the 422 path must never echo the uploaded bytes back to the client.
+
+
+def test_ac4_empty_filename_part_does_not_echo_payload_bytes(
+    client: TestClient, repo: repository.InMemoryDocumentRepository
+) -> None:
+    """Failure path: a part with an empty filename is 422 and leaks none of its bytes.
+
+    An empty filename makes the part arrive as a plain form field rather than an UploadFile,
+    so request validation fails while holding the whole payload.
+    """
+    response = client.post("/documents", files={"file": ("", SECRET_PNG_BYTES, "image/png")})
+
+    assert response.status_code == 422
+    assert_envelope(response.json(), code="validation_error")
+    assert_no_payload_leak(response, SECRET_MARKER)
+    assert "PNG" not in response.text
+    assert len(repo) == 0
+
+
+def test_ac4_non_file_form_field_does_not_echo_payload_bytes(
+    client: TestClient, repo: repository.InMemoryDocumentRepository
+) -> None:
+    """Edge: a plain (non-file) form field named `file` is 422 and leaks none of its content."""
+    response = client.post("/documents", data={"file": f"{SECRET_MARKER}-as-a-form-field"})
+
+    assert response.status_code == 422
+    assert_envelope(response.json(), code="validation_error")
+    assert_no_payload_leak(response, SECRET_MARKER)
+    assert len(repo) == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"files": {"file": ("", SECRET_PNG_BYTES, "image/png")}},
+        {"data": {"file": f"{SECRET_MARKER}-as-a-form-field"}},
+        {"files": {"nope": ("a.png", PNG_BYTES, "image/png")}},
+    ],
+    ids=["empty-filename", "form-field", "missing-part"],
+)
+def test_ac4_validation_errors_keep_type_loc_msg_and_drop_input_and_ctx(
+    client: TestClient, kwargs: dict[str, Any]
+) -> None:
+    """Happy path for the contract: details.errors stays useful but carries no echoed input."""
+    response = client.post("/documents", **kwargs)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert_envelope(body, code="validation_error")
+    errors = body["error"]["details"]["errors"]
+    assert isinstance(errors, list)
+    assert len(errors) > 0
+    for entry in errors:
+        assert isinstance(entry, dict)
+        assert {"type", "loc", "msg"} <= set(entry.keys())
+        assert isinstance(entry["type"], str)
+        assert isinstance(entry["loc"], list)
+        assert isinstance(entry["msg"], str)
+        assert "input" not in entry
+        assert "ctx" not in entry
 
 
 # --------------------------------------------------------------------------- AC5
