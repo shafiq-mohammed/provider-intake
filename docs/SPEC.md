@@ -183,7 +183,7 @@ Envelope, always:
 | Trigger                                   | Status | code                        | details                                              |
 |-------------------------------------------|--------|-----------------------------|------------------------------------------------------|
 | `ApiError` raised anywhere                | its own| its own                     | its own (or `{}`)                                    |
-| `fastapi.exceptions.RequestValidationError` | 422  | `validation_error`          | `{"errors": safe_validation_errors(exc)}`         |
+| `fastapi.exceptions.RequestValidationError` | 422  | `validation_error`          | `{"errors": safe_validation_errors(exc)}`            |
 | Starlette `HTTPException` (unknown route) | 404    | `not_found`                 | `{}`                                                 |
 | Starlette `HTTPException` (bad method)    | 405    | `method_not_allowed`        | `{}`                                                 |
 | Starlette `HTTPException` (other)         | its own| `http_error`                | `{}`                                                 |
@@ -300,6 +300,7 @@ class Settings(BaseModel):
 # src/app/errors.py
 from typing import Any
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 class ApiError(Exception):
