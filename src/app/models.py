@@ -54,6 +54,11 @@ class FieldResult(BaseModel):
 
     Frozen: the A8 invariant below is enforced at construction, so no later assignment may
     put a value back on a non-``found`` field. Validation builds new instances (T-005).
+
+    Two pydantic escape hatches skip validation by design and therefore skip the invariant:
+    ``model_copy(update=...)`` and ``model_construct()``. Neither is used anywhere in
+    ``src/``, so the invariant holds on every path that can reach a response. Build a new
+    ``FieldResult`` instead of reaching for either.
     """
 
     model_config = ConfigDict(frozen=True)
