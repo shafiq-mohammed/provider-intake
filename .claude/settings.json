@@ -1,0 +1,60 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(python:*)",
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(uv:*)",
+      "Bash(pip:*)",
+      "Bash(uvicorn:*)",
+      "Bash(codex exec:*)",
+      "Bash(scripts/:*)",
+      "Bash(./scripts/:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(rm -rf:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/post_edit_checks.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/stop_gate.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

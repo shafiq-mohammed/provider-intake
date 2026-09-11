@@ -1,0 +1,7 @@
+.review/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+.claude/settings.local.json
