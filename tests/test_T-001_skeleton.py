@@ -7,12 +7,13 @@ because it reads the process environment (SPEC A13 / section 10).
 from typing import Any
 
 import pytest
-from app.errors import ApiError
-from app.main import create_app
-from app.settings import Settings
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
+
+from app.errors import ApiError
+from app.main import create_app
+from app.settings import Settings
 
 
 def make_app() -> FastAPI:

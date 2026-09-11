@@ -96,7 +96,11 @@ A15. Live T-007 tests need `ANTHROPIC_API_KEY` in the environment and sample doc
 A16. Unhandled exceptions (bugs) still surface as a 500. Every anticipated bad-input path in
     this spec is mapped to a 4xx envelope; a 500 in a test is a defect, not expected behavior.
 A17. Error `details` never contain document bytes or OCR text. Engine/extractor failures report
-    only the exception class name.
+    only the exception class name. This binds the 422 handler too: pydantic's `exc.errors()`
+    carries the rejected value under `input`, which for an upload is the document content, so
+    validation errors are projected to `type`/`loc`/`msg` by `safe_validation_errors()`.
+    (Corrected during T-002 review, which found the raw passthrough echoing uploaded bytes
+    back to the client. A17 wins over the earlier literal `jsonable_encoder(exc.errors())`.)
 
 ## 5. Stack and conventions
 
@@ -179,7 +183,7 @@ Envelope, always:
 | Trigger                                   | Status | code                        | details                                              |
 |-------------------------------------------|--------|-----------------------------|------------------------------------------------------|
 | `ApiError` raised anywhere                | its own| its own                     | its own (or `{}`)                                    |
-| `fastapi.exceptions.RequestValidationError` | 422  | `validation_error`          | `{"errors": jsonable_encoder(exc.errors())}`         |
+| `fastapi.exceptions.RequestValidationError` | 422  | `validation_error`          | `{"errors": safe_validation_errors(exc)}`            |
 | Starlette `HTTPException` (unknown route) | 404    | `not_found`                 | `{}`                                                 |
 | Starlette `HTTPException` (bad method)    | 405    | `method_not_allowed`        | `{}`                                                 |
 | Starlette `HTTPException` (other)         | its own| `http_error`                | `{}`                                                 |
@@ -296,6 +300,7 @@ class Settings(BaseModel):
 # src/app/errors.py
 from typing import Any
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 class ApiError(Exception):
@@ -312,9 +317,14 @@ def error_response(
 ) -> JSONResponse:
     """Body: {"error": {"code": code, "message": message, "details": details or {}}}"""
 
+def safe_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """exc.errors() projected down to type/loc/msg. `input` and `ctx` are dropped:
+    for a failed upload `input` holds the document content itself, which must never
+    reach the client or a log (A17)."""
+
 def register_error_handlers(app: FastAPI) -> None:
     """Registers handlers for ApiError, RequestValidationError (422 validation_error,
-    details {"errors": jsonable_encoder(exc.errors())}) and Starlette HTTPException
+    details {"errors": safe_validation_errors(exc)}) and Starlette HTTPException
     (404 not_found, 405 method_not_allowed, otherwise http_error; message = exc.detail)."""
 ```
 

@@ -45,6 +45,19 @@ def error_response(
     )
 
 
+def safe_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """Project pydantic's validation errors down to the keys that are safe to return.
+
+    ``exc.errors()`` carries the offending value under ``input`` (and sometimes ``ctx``).
+    For an upload that is the document content itself, which must never reach the client
+    or a log (SPEC A17). Only ``type``, ``loc`` and ``msg`` survive.
+    """
+    return [
+        {key: jsonable_encoder(error[key]) for key in ("type", "loc", "msg") if key in error}
+        for error in exc.errors()
+    ]
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register the app-level handlers that produce the error envelope."""
 
@@ -58,7 +71,7 @@ def register_error_handlers(app: FastAPI) -> None:
             422,
             "validation_error",
             "Request validation failed.",
-            {"errors": jsonable_encoder(exc.errors())},
+            {"errors": safe_validation_errors(exc)},
         )
 
     async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
