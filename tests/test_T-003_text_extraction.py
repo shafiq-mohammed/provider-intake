@@ -39,6 +39,10 @@ SECRET_PNG_BYTES = PNG_SIGNATURE + SECRET_MARKER.encode() + b"A" * 40
 PDF_TEXT = "Provider: Jane Doe License: LCSW-12345 State: CA"
 THIN_PDF_TEXT = "Provider Jane Doe License LCSW-12345 State CA Exp 2027 ok"
 
+# A short, punctuation-free layer used to pin the >= boundary of min_pdf_text_chars (SPEC A6).
+# Its measured length is asserted in the test rather than assumed here.
+BOUNDARY_PDF_TEXT = "ABCDEFGHIJ"
+
 
 def minimal_pdf(text: str) -> bytes:
     """Factory only: a one-page PDF whose text layer is exactly ``text`` (SPEC section 10).
@@ -73,6 +77,16 @@ def blank_pdf() -> bytes:
     """Factory only: a one-page PDF with an empty text layer (SPEC section 10)."""
     writer = pypdf.PdfWriter()
     writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def encrypted_pdf() -> bytes:
+    """Factory only: a one-page password-protected PDF (SPEC A6 names encrypted files)."""
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.encrypt("pw")
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
@@ -225,6 +239,39 @@ def test_ac2_text_layer_below_min_pdf_text_chars_uses_the_engine() -> None:
     assert default_engine.calls == []
 
 
+def test_ac2_threshold_is_inclusive_at_exactly_min_pdf_text_chars() -> None:
+    """Edge: both sides of the boundary, so `>=` cannot silently become `>` (SPEC A6).
+
+    The exact length is measured from the fixture instead of assumed, because pypdf does
+    not promise to hand back the input string byte for byte.
+    """
+    content = minimal_pdf(BOUNDARY_PDF_TEXT)
+    exact = len(text_extraction.pdf_text_layer(content).strip())
+    assert exact == 10
+
+    # At the threshold: >= holds, the text layer wins and the engine is never touched.
+    at_engine = ocr.FakeOcrEngine("ocr text from vision")
+    at_client = client_for(at_engine, Settings(min_pdf_text_chars=exact))
+    at_id = upload(at_client, "boundary.pdf", content, "application/pdf")
+    at_response = at_client.post(f"/documents/{at_id}/text")
+
+    assert at_response.status_code == 200
+    assert at_response.json()["source"] == "pdf_text_layer"
+    assert BOUNDARY_PDF_TEXT in at_response.json()["text"]
+    assert at_engine.calls == []
+
+    # One character above it: the same bytes now fall through to the engine.
+    above_engine = ocr.FakeOcrEngine("ocr text from vision")
+    above_client = client_for(above_engine, Settings(min_pdf_text_chars=exact + 1))
+    above_id = upload(above_client, "boundary.pdf", content, "application/pdf")
+    above_response = above_client.post(f"/documents/{above_id}/text")
+
+    assert above_response.status_code == 200
+    assert above_response.json()["source"] == "ocr"
+    assert above_response.json()["text"] == "ocr text from vision"
+    assert above_engine.calls == ["application/pdf"]
+
+
 def test_ac2_engine_returning_empty_text_still_returns_200() -> None:
     """Failure path: an engine that finds nothing is a 200 with an empty string, not an error."""
     engine = ocr.FakeOcrEngine("")
@@ -326,6 +373,39 @@ def test_ac4_custom_exception_class_name_is_the_reported_reason() -> None:
     assert_no_payload_leak(response, SECRET_MARKER)
 
 
+def test_ac4_engine_exception_message_never_reaches_the_client() -> None:
+    """Failure path: the reason is the class name only, so the message is dropped (SPEC A17).
+
+    Two legs: a message that quotes the payload, and an exception built straight from the
+    raw document bytes. Neither may surface in any encoding of the response body.
+    """
+    message_engine = ocr.FakeOcrEngine(
+        error=RuntimeError(f"vision down while reading {SECRET_MARKER}")
+    )
+    message_client = client_for(message_engine)
+    message_id = upload(message_client, "license.png", PNG_BYTES, "image/png")
+
+    message_response = message_client.post(f"/documents/{message_id}/text")
+
+    assert message_response.status_code == 422
+    assert_envelope(message_response.json(), code="ocr_failed", details={"reason": "RuntimeError"})
+    assert_no_payload_leak(message_response, SECRET_MARKER)
+    assert "vision down" not in message_response.text
+    assert message_engine.calls == ["image/png"]
+
+    # Second leg: the exception is constructed from the document bytes themselves.
+    bytes_engine = ocr.FakeOcrEngine(error=ValueError(SECRET_PNG_BYTES))
+    bytes_client = client_for(bytes_engine)
+    bytes_id = upload(bytes_client, "license.png", SECRET_PNG_BYTES, "image/png")
+
+    bytes_response = bytes_client.post(f"/documents/{bytes_id}/text")
+
+    assert bytes_response.status_code == 422
+    assert_envelope(bytes_response.json(), code="ocr_failed", details={"reason": "ValueError"})
+    assert_no_payload_leak(bytes_response, SECRET_MARKER)
+    assert bytes_engine.calls == ["image/png"]
+
+
 def test_ac4_extract_text_raises_ocr_error_wrapping_the_original() -> None:
     """Failure path: the function raises OcrError with the engine's exception as __cause__."""
     original = RuntimeError("vision down")
@@ -415,10 +495,15 @@ def test_ac6_corrupt_pdf_falls_back_to_the_engine() -> None:
 
 
 def test_ac6_pdf_text_layer_returns_empty_string_for_unreadable_and_blank_pdfs() -> None:
-    """Edge: pdf_text_layer swallows pypdf failures and reports an empty layer."""
+    """Edge: pdf_text_layer swallows pypdf failures and reports an empty layer.
+
+    Encrypted files are named by the spec docstring alongside corrupt ones: they must
+    yield "" rather than raise, so the routing falls through to the engine (SPEC A6).
+    """
     assert text_extraction.pdf_text_layer(CORRUPT_PDF_BYTES) == ""
     assert text_extraction.pdf_text_layer(blank_pdf()) == ""
     assert text_extraction.pdf_text_layer(b"") == ""
+    assert text_extraction.pdf_text_layer(encrypted_pdf()) == ""
     # Positive control: a readable PDF really does yield its text layer.
     assert "Jane Doe" in text_extraction.pdf_text_layer(minimal_pdf(PDF_TEXT))
 
