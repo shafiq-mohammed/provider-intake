@@ -1,4 +1,4 @@
-"""API router: upload limits, document upload, metadata and text extraction (T-002, T-003)."""
+"""API router: uploads, metadata, text extraction and field extraction (T-002..T-004)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, File, Request, UploadFile
 
 from app.errors import ApiError
-from app.models import DocumentMeta
+from app.extraction import ExtractorError, FieldExtractor
+from app.models import (
+    DocumentMeta,
+    ExtractionResponse,
+    ExtractionResult,
+    FieldStatus,
+    TextExtraction,
+)
 from app.ocr import OcrEngine, OcrError
 from app.repository import DocumentRepository, StoredDocument
 from app.settings import Settings
@@ -57,15 +64,9 @@ async def extract_document_text(request: Request, document_id: str) -> dict[str,
     engine: OcrEngine = request.app.state.ocr_engine
 
     document = _require_document(request, document_id)
-    try:
-        extraction = extract_text(document, engine, min_pdf_text_chars=settings.min_pdf_text_chars)
-    except OcrError as exc:
-        raise ApiError(
-            422,
-            "ocr_failed",
-            "The OCR engine could not read this document.",
-            {"reason": type(exc.__cause__ or exc).__name__},
-        ) from exc
+    extraction = _extract_text_or_422(
+        document, engine, min_pdf_text_chars=settings.min_pdf_text_chars
+    )
 
     return {
         "document_id": document.id,
@@ -73,6 +74,78 @@ async def extract_document_text(request: Request, document_id: str) -> dict[str,
         "source": extraction.source,
         "char_count": extraction.char_count,
     }
+
+
+@router.post("/documents/{document_id}/extract", response_model=ExtractionResponse)
+async def extract_document_fields(request: Request, document_id: str) -> ExtractionResponse:
+    """Return the four credential fields of a document; results are never stored."""
+    settings: Settings = request.app.state.settings
+    engine: OcrEngine = request.app.state.ocr_engine
+    extractor: FieldExtractor = request.app.state.field_extractor
+
+    document = _require_document(request, document_id)
+    extraction = _extract_text_or_422(
+        document, engine, min_pdf_text_chars=settings.min_pdf_text_chars
+    )
+
+    if extraction.text.strip() == "":
+        # Blank text short-circuits: the extractor is never called (SPEC A7).
+        result = ExtractionResult.all_with(FieldStatus.NOT_FOUND, issues=["no_text"])
+    else:
+        result = _extract_fields_or_422(extractor, extraction.text)
+
+    return ExtractionResponse(
+        document_id=document.id,
+        text_source=extraction.source,
+        **result.fields(),
+    )
+
+
+def _extract_text_or_422(
+    document: StoredDocument, engine: OcrEngine, *, min_pdf_text_chars: int
+) -> TextExtraction:
+    """Extract the document's text, mapping an ``OcrError`` onto the 422 envelope.
+
+    Shared by ``/text`` and ``/extract`` so the mapping exists exactly once.
+    """
+    try:
+        return extract_text(document, engine, min_pdf_text_chars=min_pdf_text_chars)
+    except OcrError as exc:
+        raise ApiError(
+            422,
+            "ocr_failed",
+            "The OCR engine could not read this document.",
+            {"reason": _reason(exc)},
+        ) from exc
+
+
+def _extract_fields_or_422(extractor: FieldExtractor, text: str) -> ExtractionResult:
+    """Run the extractor, mapping any failure onto the 422 envelope."""
+    try:
+        return _run_extractor(extractor, text)
+    except ExtractorError as exc:
+        raise ApiError(
+            422,
+            "extraction_failed",
+            "The field extractor could not read this document.",
+            {"reason": _reason(exc)},
+        ) from exc
+
+
+def _run_extractor(extractor: FieldExtractor, text: str) -> ExtractionResult:
+    """Call the extractor, wrapping any failure as ``ExtractorError`` (original as cause)."""
+    try:
+        return extractor.extract_fields(text)
+    except Exception as exc:
+        raise ExtractorError("The field extractor failed.") from exc
+
+
+def _reason(exc: Exception) -> str:
+    """Name the class that failed, and nothing else.
+
+    Never the exception message, the document bytes or the extracted text (SPEC A17).
+    """
+    return type(exc.__cause__ or exc).__name__
 
 
 def _require_document(request: Request, document_id: str) -> StoredDocument:
