@@ -5,3 +5,12 @@ __pycache__/
 .venv/
 *.egg-info/
 .claude/settings.local.json
+
+# Secrets: the Anthropic key is read from the environment, never from a file (SPEC A13).
+.env
+.env.*
+secrets/
+
+# Sample credential documents for T-007's live tests are real provider licences.
+# A human places them locally (SPEC A15); they must never reach the repo.
+tests/fixtures/
