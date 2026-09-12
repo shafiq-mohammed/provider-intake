@@ -13,6 +13,7 @@ from app.extraction import FieldExtractor, build_field_extractor
 from app.ocr import OcrEngine, build_ocr_engine
 from app.repository import DocumentRepository, InMemoryDocumentRepository
 from app.settings import Settings
+from app.ui import router as ui_router
 
 
 def create_app(
@@ -45,6 +46,7 @@ def create_app(
     app.state.clock = clock if clock is not None else date.today
     register_error_handlers(app)
     app.include_router(router)
+    app.include_router(ui_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
