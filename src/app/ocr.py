@@ -38,9 +38,17 @@ class FakeOcrEngine:
 def build_ocr_engine(settings: Settings) -> OcrEngine:
     """Build the engine named by ``settings.ocr_backend``.
 
-    ``"fake"`` builds a ``FakeOcrEngine``; every other backend is a ``ValueError``
-    until the real adapter arrives in T-007.
+    ``"fake"`` builds a ``FakeOcrEngine``; ``"anthropic"`` builds an ``AnthropicOcrEngine`` on a
+    real client, which is a ``ValueError`` without an API key (T-007). Every other backend is a
+    ``ValueError``. The adapter module is imported inside the branch so the Anthropic SDK is not
+    imported on the fake path.
     """
     if settings.ocr_backend == "fake":
         return FakeOcrEngine()
+    if settings.ocr_backend == "anthropic":
+        from app import anthropic_adapters
+
+        return anthropic_adapters.AnthropicOcrEngine(
+            anthropic_adapters.make_client(settings), settings.anthropic_model
+        )
     raise ValueError(f"Unsupported ocr_backend: {settings.ocr_backend!r}")

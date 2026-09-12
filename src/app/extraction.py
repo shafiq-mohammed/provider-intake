@@ -43,9 +43,17 @@ class FakeFieldExtractor:
 def build_field_extractor(settings: Settings) -> FieldExtractor:
     """Build the extractor named by ``settings.extractor_backend``.
 
-    ``"fake"`` builds a ``FakeFieldExtractor``; every other backend is a ``ValueError``
-    until the real adapter arrives in T-007.
+    ``"fake"`` builds a ``FakeFieldExtractor``; ``"anthropic"`` builds an
+    ``AnthropicFieldExtractor`` on a real client, which is a ``ValueError`` without an API key
+    (T-007). Every other backend is a ``ValueError``. The adapter module is imported inside the
+    branch so the Anthropic SDK is not imported on the fake path.
     """
     if settings.extractor_backend == "fake":
         return FakeFieldExtractor()
+    if settings.extractor_backend == "anthropic":
+        from app import anthropic_adapters
+
+        return anthropic_adapters.AnthropicFieldExtractor(
+            anthropic_adapters.make_client(settings), settings.anthropic_model
+        )
     raise ValueError(f"Unsupported extractor_backend: {settings.extractor_backend!r}")
