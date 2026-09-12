@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date
+
 from fastapi import FastAPI
 
 from app.api import router
@@ -18,6 +21,7 @@ def create_app(
     repository: DocumentRepository | None = None,
     ocr_engine: OcrEngine | None = None,
     field_extractor: FieldExtractor | None = None,
+    clock: Callable[[], date] | None = None,
 ) -> FastAPI:
     """Build an isolated app with injected collaborators.
 
@@ -26,6 +30,7 @@ def create_app(
     ``ocr_engine`` of ``None`` means ``build_ocr_engine(settings)`` and ``field_extractor``
     of ``None`` means ``build_field_extractor(settings)``; both fail fast here on an
     unsupported backend.
+    ``clock`` of ``None`` means ``datetime.date.today``; it is what validation calls "today".
     """
     app = FastAPI(title="Provider Document Intake")
     resolved_settings = settings if settings is not None else Settings()
@@ -37,6 +42,7 @@ def create_app(
     app.state.field_extractor = (
         field_extractor if field_extractor is not None else build_field_extractor(resolved_settings)
     )
+    app.state.clock = clock if clock is not None else date.today
     register_error_handlers(app)
     app.include_router(router)
 
