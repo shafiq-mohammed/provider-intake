@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Provider Document Intake</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 2rem auto;
+    max-width: 48rem;
+    line-height: 1.5;
+  }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  #error { color: #a00; font-weight: 600; min-height: 1.5rem; }
+  #max-upload, #document-meta, #missing-fields { color: #333; }
+  button { padding: 0.4rem 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Provider document intake</h1>
+
+<form id="upload-form">
+  <p id="max-upload">Loading limits&hellip;</p>
+  <p>
+    <label for="file">Credential document</label>
+    <input type="file" id="file" name="file" accept="application/pdf,image/jpeg,image/png" required>
+  </p>
+  <p><button id="upload" type="submit" disabled>Upload and extract</button></p>
+</form>
+
+<p id="error" role="alert"></p>
+<p id="document-meta"></p>
+
+<table id="results">
+  <thead>
+    <tr><th scope="col">Field</th><th scope="col">Value</th><th scope="col">Status</th><th scope="col">Issues</th></tr>
+  </thead>
+  <tbody>
+    <tr data-field="provider_name">
+      <th scope="row">Provider name</th>
+      <td data-cell="value"></td><td data-cell="status"></td><td data-cell="issues"></td>
+    </tr>
+    <tr data-field="license_number">
+      <th scope="row">License number</th>
+      <td data-cell="value"></td><td data-cell="status"></td><td data-cell="issues"></td>
+    </tr>
+    <tr data-field="state">
+      <th scope="row">State</th>
+      <td data-cell="value"></td><td data-cell="status"></td><td data-cell="issues"></td>
+    </tr>
+    <tr data-field="expiration_date">
+      <th scope="row">Expiration date</th>
+      <td data-cell="value"></td><td data-cell="status"></td><td data-cell="issues"></td>
+    </tr>
+  </tbody>
+</table>
+
+<p id="missing-fields"></p>
+
+<script>
+(function () {
+  "use strict";
+
+  var FIELD_NAMES = ["provider_name", "license_number", "state", "expiration_date"];
+
+  var form = document.getElementById("upload-form");
+  var fileInput = document.getElementById("file");
+  var uploadButton = document.getElementById("upload");
+  var maxUploadEl = document.getElementById("max-upload");
+  var errorEl = document.getElementById("error");
+  var metaEl = document.getElementById("document-meta");
+  var missingEl = document.getElementById("missing-fields");
+  var resultsEl = document.getElementById("results");
+
+  // Set once GET /config answers; the submit button stays disabled until then, so the
+  // client-side size guard always has a real limit to compare against.
+  var maxUploadBytes = null;
+
+  function showError(message) {
+    errorEl.textContent = message;
+  }
+
+  function clearError() {
+    errorEl.textContent = "";
+  }
+
+  function megabytes(bytes) {
+    var mb = bytes / (1024 * 1024);
+    return Number.isInteger(mb) ? String(mb) : mb.toFixed(1);
+  }
+
+  function readBody(response) {
+    return response.json().catch(function () {
+      return null;
+    });
+  }
+
+  // Errors come back as {"error": {"code", "message", "details"}}.
+  function envelopeMessage(body, fallback) {
+    var error = body && body.error;
+    if (error && typeof error.message === "string" && error.message !== "") {
+      return error.code ? error.message + " [" + error.code + "]" : error.message;
+    }
+    return fallback;
+  }
+
+  function cell(name, kind) {
+    return resultsEl.querySelector('tr[data-field="' + name + '"] td[data-cell="' + kind + '"]');
+  }
+
+  function clearResults() {
+    FIELD_NAMES.forEach(function (name) {
+      ["value", "status", "issues"].forEach(function (kind) {
+        cell(name, kind).textContent = "";
+      });
+    });
+    missingEl.textContent = "";
+  }
+
+  function render(result) {
+    FIELD_NAMES.forEach(function (name) {
+      var field = result[name] || {};
+      cell(name, "value").textContent = field.value === null || field.value === undefined
+        ? "—"
+        : String(field.value);
+      cell(name, "status").textContent = field.status || "";
+      cell(name, "issues").textContent = (field.issues || []).join(", ");
+    });
+    var missing = result.missing_fields || [];
+    missingEl.textContent = "Missing fields: " + (missing.length ? missing.join(", ") : "none");
+  }
+
+  function loadConfig() {
+    return fetch("/config").then(function (response) {
+      return readBody(response).then(function (body) {
+        if (!response.ok) {
+          showError(envelopeMessage(body, "Could not read the upload limits."));
+          return;
+        }
+        maxUploadBytes = body.max_upload_bytes;
+        var types = (body.allowed_content_types || []).join(", ");
+        maxUploadEl.textContent =
+          "Maximum file size: " + megabytes(maxUploadBytes) + " MB (" +
+          maxUploadBytes + " bytes). Accepted: " + types;
+        uploadButton.disabled = false;
+      });
+    }).catch(function (err) {
+      showError("Could not read the upload limits: " + err.message);
+    });
+  }
+
+  function upload(file) {
+    var body = new FormData();
+    body.append("file", file);
+    return fetch("/documents", { method: "POST", body: body }).then(function (response) {
+      return readBody(response).then(function (payload) {
+        if (!response.ok) {
+          throw new Error(envelopeMessage(payload, "Upload failed."));
+        }
+        metaEl.textContent =
+          "Uploaded " + payload.filename + " (" + payload.content_type + ", " +
+          payload.size_bytes + " bytes)";
+        return payload.id;
+      });
+    });
+  }
+
+  function extract(documentId) {
+    var url = "/documents/" + encodeURIComponent(documentId) + "/extract";
+    return fetch(url, { method: "POST" }).then(function (response) {
+      return readBody(response).then(function (payload) {
+        if (!response.ok) {
+          throw new Error(envelopeMessage(payload, "Extraction failed."));
+        }
+        render(payload);
+      });
+    });
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    clearError();
+    clearResults();
+    metaEl.textContent = "";
+
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      showError("Choose a file first.");
+      return;
+    }
+    if (maxUploadBytes !== null && file.size > maxUploadBytes) {
+      showError(
+        "That file is " + file.size + " bytes, which is over the maximum of " +
+        maxUploadBytes + " bytes. It was not uploaded."
+      );
+      return;
+    }
+
+    uploadButton.disabled = true;
+    upload(file)
+      .then(extract)
+      .catch(function (err) {
+        showError(err.message);
+      })
+      .then(function () {
+        uploadButton.disabled = false;
+      });
+  });
+
+  loadConfig();
+})();
+</script>
+</body>
+</html>
