@@ -58,8 +58,11 @@ EXTRACTION_PROMPT = (
     "concern named beside it rather than in place of it. "
     'Never return the status "invalid" -- it is reserved for the deterministic validation that '
     "runs after you and alone decides whether a value is usable. "
-    "Never guess: a field you cannot read is unreadable and a field that is not there is "
-    "not_found, neither is found. "
+    "Never invent a value: a field you cannot read is unreadable and a field the text gives you "
+    "nothing for is not_found; neither is found. "
+    "If the text supports a field without stating it outright (for example the issuing state "
+    'read from an address on the document), report it as found, put the supporting text in "raw" '
+    'and name how you got it in "issues", for example inferred_from_address. '
     "The document text follows."
 )
 
