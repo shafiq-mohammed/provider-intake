@@ -687,6 +687,16 @@ Contract of `src/app/static/index.html` (plain HTML + inline vanilla JS, no exte
   `<td data-cell="value">`, `<td data-cell="status">`, `<td data-cell="issues">`.
 - `<p id="missing-fields">` lists `missing_fields` joined by ", " (or "none").
 - `<p id="document-meta">` shows filename and size after upload.
+- **Value cell (T-009):** `<td data-cell="value">` shows `value`; when `value` is null it falls back
+  to `raw` and carries `data-unconfirmed="true"`; when both are null it shows the em-dash
+  placeholder, unmarked. A8 nulls `value` for every non-`found` status, so an expired date, an
+  unparseable date and an unknown state would otherwise all display as a dash with the document's
+  own text invisible to the reader. The marker must be *removed* as well as set — cells are reused
+  across uploads — and it carries a visible style, not only an attribute, so the distinction
+  survives for a reader who cannot perceive colour. **Display only: `value` stays null in the JSON
+  and the field stays in `missing_fields`.**
+- The JS function names `render` and `clearResults` are contract, not incidental: the T-006 and
+  T-009 suites locate the render logic by those names.
 
 ### T-007 — Real Anthropic adapters selected by settings
 
