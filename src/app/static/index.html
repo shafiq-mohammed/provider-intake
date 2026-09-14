@@ -17,6 +17,9 @@
   #error { color: #a00; font-weight: 600; min-height: 1.5rem; }
   #max-upload, #document-meta, #missing-fields { color: #333; }
   button { padding: 0.4rem 0.9rem; }
+  /* A value shown only because the document said so, not because it validated. */
+  td[data-unconfirmed="true"] { color: #666; font-style: italic; }
+  td[data-unconfirmed="true"]::after { content: " (as read)"; font-size: 0.85em; }
 </style>
 </head>
 <body>
@@ -116,16 +119,36 @@
       ["value", "status", "issues"].forEach(function (kind) {
         cell(name, kind).textContent = "";
       });
+      // Cells are reused across uploads; a stale marker would flag the next document.
+      cell(name, "value").removeAttribute("data-unconfirmed");
     });
     missingEl.textContent = "";
+  }
+
+  function present(text) {
+    return text !== null && text !== undefined && String(text) !== "";
+  }
+
+  // The API nulls `value` for anything that did not validate (SPEC A8), so an expired date,
+  // an unparseable date and an unknown state reach us with the document's own text in `raw`.
+  // Show that text rather than a dash, marked, so the reader can see what the document said
+  // without mistaking it for a value the system accepted.
+  function fillValueCell(target, field) {
+    var confirmed = present(field.value);
+    var text = confirmed ? field.value : field.raw;
+    var isFallback = !confirmed && present(field.raw);
+    target.textContent = present(text) ? String(text) : "—";
+    if (isFallback) {
+      target.setAttribute("data-unconfirmed", "true");
+    } else {
+      target.removeAttribute("data-unconfirmed");
+    }
   }
 
   function render(result) {
     FIELD_NAMES.forEach(function (name) {
       var field = result[name] || {};
-      cell(name, "value").textContent = field.value === null || field.value === undefined
-        ? "—"
-        : String(field.value);
+      fillValueCell(cell(name, "value"), field);
       cell(name, "status").textContent = field.status || "";
       cell(name, "issues").textContent = (field.issues || []).join(", ");
     });
