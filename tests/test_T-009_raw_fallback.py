@@ -11,6 +11,14 @@ are deliberately about the *source*, not about what a reader sees. If the render
 be proven, that needs a jsdom-driven test (the ticket's own recommendation); until then the
 rendering is verified by hand, not by this file.
 
+A source-contract test is worth nothing unless it can go red, so the AC1-AC4 assertions are
+structural, not textual: they read the statement that does the work (the one selecting the
+displayed text, the one clearing the marker) rather than searching a character window for a
+token that some unrelated line also happens to contain. Two of them were previously satisfiable
+by lines with nothing to do with the fallback -- ``textContent = ""`` in ``clearResults``, and
+the presence test on the line above the selection -- and so survived mutations of the code they
+name. The regexes below record what those holes were.
+
 AC5 is the one test here with real teeth: it drives ``POST /documents/{id}/extract`` with a
 stubbed extractor and asserts the JSON is unchanged -- ``value`` still null, the field still in
 ``missing_fields``. That is the regression guard that stops a display change from quietly
@@ -56,15 +64,43 @@ VALUE_RE = re.compile(r"\.value\b|\[\s*[\"']value[\"']\s*\]")
 
 # The marker, set as an attribute or through the dataset API.
 MARKER_RE = re.compile(r"data-unconfirmed|dataset\s*\.\s*unconfirmed|dataset\s*\[")
-# Any construct that takes the marker off again: removeAttribute, toggleAttribute, delete
-# dataset.x, or assigning a falsy value.
-# The assignment alternative is written so ``=== null`` (a comparison) cannot satisfy it.
+
+# The marker named in a dataset access: ``.dataset.unconfirmed`` / ``.dataset["unconfirmed"]``.
+_DATASET_MARKER = r"dataset\s*(?:\.\s*unconfirmed\b|\[\s*[\"']unconfirmed[\"']\s*\])"
+
+# Any construct that takes *this* marker off again **and names it while doing so**:
+# ``removeAttribute("data-unconfirmed")``, ``toggleAttribute("data-unconfirmed", cond)``,
+# ``delete el.dataset.unconfirmed``, or ``el.dataset.unconfirmed = ""``.
+#
+# A bare assignment of ``""`` is deliberately not enough. The previous version of this regex
+# accepted ``=\s*(null|false|""|'')`` anywhere, so ``cell(name, kind).textContent = ""`` -- a
+# line that blanks a cell and has nothing to do with the marker -- satisfied it. That let the
+# ``removeAttribute("data-unconfirmed")`` line be deleted from ``clearResults`` with all twelve
+# tests still green, which is exactly the regression AC2 names.
 MARKER_CLEAR_RE = re.compile(
-    r"removeAttribute|toggleAttribute|delete\s+\w+\s*(\.|\[)"
-    r"|(?<![=!<>])=\s*(null|false|\"\"|'')"
+    r"(?:remove|toggle)Attribute\s*\(\s*(?:[\"']data-unconfirmed[\"']|[\w$.]*[Uu]nconfirmed\b)"
+    rf"|delete\s+[^;={{}}]{{0,160}}?{_DATASET_MARKER}"
+    rf"|{_DATASET_MARKER}\s*=\s*(?:\"\"|''|null|undefined|false)"
 )
-# Tokens that make a reference conditional rather than unconditional.
-GUARD_RE = re.compile(r"null|undefined|\|\||\?\?|\?|!|if\b")
+# The mirror image: a construct that puts the marker on. ``toggleAttribute`` counts as both,
+# because one call really does do both.
+MARKER_SET_RE = re.compile(
+    r"(?:set|toggle)Attribute\s*\(\s*[\"']data-unconfirmed[\"']"
+    rf"|{_DATASET_MARKER}\s*=\s*(?![\"']\s*[\"']|''|null|undefined|false)"
+)
+
+# Constructs that genuinely make a reference conditional. Bare ``?`` and ``!`` used to be in
+# here, which made "raw is read with a null guard" true of any text containing a ``!==``
+# anywhere -- near enough to a tautology to be worthless. A ternary counts only when its ``:``
+# branch is present too.
+GUARD_RE = re.compile(
+    r"[=!]==?\s*(?:null|undefined)"  # == null, === null, != undefined, !== null
+    r"|\btypeof\b"
+    r"|\?\?"
+    r"|\|\|"
+    r"|\bif\s*\("
+    r"|\?[^?:]*:"  # a ternary, both branches
+)
 
 EM_DASH_SPELLINGS = ("—", "&mdash;", "\\u2014")
 
@@ -192,6 +228,118 @@ def raw_chunk(scope: str) -> str:
     chunks = [part for part in scope.split("\n/* --- */\n") if RAW_RE.search(part)]
     assert chunks, "the render source never reads field.raw"
     return chunks[0]
+
+
+def statements(chunk: str) -> list[str]:
+    """``chunk`` split into statements on ``;``.
+
+    Crude on purpose, and sufficient: the render path has no ``for (;;)`` and no semicolon
+    inside a string literal. Statement scope matters because a 320-character window around the
+    ``raw`` read spans the whole of ``fillValueCell``, so anything asserted over a window is
+    really asserted over the entire function.
+    """
+    return chunk.split(";")
+
+
+def raw_statement(chunk: str) -> str:
+    """The first statement in ``chunk`` that reads ``raw``; asserts there is one."""
+    for statement in statements(chunk):
+        if RAW_RE.search(statement):
+            return statement
+    raise AssertionError(f"no statement in the chunk reads field.raw: {chunk.strip()!r}")
+
+
+def inline_locals(chunk: str, expression: str) -> str:
+    """Substitute simple ``var name = expr;`` locals declared in ``chunk`` into ``expression``.
+
+    Reader only -- it decides nothing about precedence. It exists so a condition written as
+    ``confirmed ? ... : ...`` can be read back as the ``present(field.value)`` it was assigned,
+    and the test does not silently depend on whether the coder named the test or inlined it.
+    """
+    declared = dict(re.findall(r"\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);", chunk))
+    for _ in range(3):  # depth limit: a self-referential var cannot loop forever
+        expanded = expression
+        for name, value in declared.items():
+            expanded = re.sub(rf"\b{re.escape(name)}\b", f"({value})", expanded)
+        if expanded == expression:
+            break
+        expression = expanded
+    return expression
+
+
+def _top_level_ternary(statement: str) -> tuple[str, str, str] | None:
+    """Split ``cond ? consequent : alternative`` on the first ternary outside any bracket."""
+    depth = 0
+    question = None
+    index = 0
+    while index < len(statement):
+        char = statement[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "?":
+            if statement[index : index + 2] == "??":  # nullish coalescing, not a ternary
+                index += 2
+                continue
+            if statement[index + 1 : index + 2] == ".":  # optional chaining
+                index += 2
+                continue
+            if depth == 0:
+                question = index
+                break
+        index += 1
+    if question is None:
+        return None
+
+    depth = 0
+    nested = 0
+    index = question + 1
+    while index < len(statement):
+        char = statement[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "?" and depth == 0:
+            if statement[index : index + 2] == "??" or statement[index + 1 : index + 2] == ".":
+                index += 2
+                continue
+            nested += 1
+        elif char == ":" and depth == 0:
+            if nested:
+                nested -= 1
+            else:
+                return (
+                    statement[:question],
+                    statement[question + 1 : index],
+                    statement[index + 1 :],
+                )
+        index += 1
+    return None
+
+
+def _top_level_coalesce(statement: str) -> tuple[str, str] | None:
+    """Split ``left ?? right`` / ``left || right`` on the first such operator outside brackets."""
+    depth = 0
+    for index, char in enumerate(statement):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and statement[index : index + 2] in ("??", "||"):
+            return statement[:index], statement[index + 2 :]
+    return None
+
+
+def right_of_assignment(expression: str) -> str:
+    """``expression`` with any leading ``var x =`` / ``el.textContent =`` stripped off."""
+    return re.split(r"=(?![=>])", expression)[-1]
+
+
+def negations(expression: str) -> int:
+    """Count logical ``!`` in ``expression``, ignoring the ``!`` of ``!=`` and ``!==``."""
+    return len(re.findall(r"!(?!=)", expression))
 
 
 def has_placeholder(source: str) -> bool:
@@ -342,20 +490,24 @@ def test_ac2_null_value_and_null_raw_keeps_the_em_dash_placeholder(scope: str) -
     """
     assert has_placeholder(scope), "the em-dash placeholder is gone from the render source"
 
-    chunk = raw_chunk(scope)
-    match = RAW_RE.search(chunk)
-    assert match is not None
-    window = chunk[max(0, match.start() - 160) : match.end() + 160]
-    assert GUARD_RE.search(window) is not None, (
-        f"field.raw is read unconditionally, with no null guard near it: {window!r}"
+    # Scoped to the statement that reads raw, not a 320-character window around it: the window
+    # covered the whole of fillValueCell, so any guard anywhere in the function satisfied it.
+    statement = raw_statement(raw_chunk(scope))
+    assert GUARD_RE.search(statement) is not None, (
+        f"field.raw is read unconditionally, with no null guard in the statement: {statement!r}"
     )
 
 
 def test_ac2_marker_is_cleared_between_renders_not_only_set(page: str) -> None:
-    """Edge: the function that blanks the cells also takes the marker off.
+    """Edge: the function that blanks the cells also takes the marker off, by name.
 
     Cells are reused across uploads. A marker that is only ever set leaves the next document's
-    empty or confirmed cell wearing a stale "unconfirmed" flag.
+    cell wearing a stale flag: an upload that fails after ``clearResults`` but before ``render``
+    shows " (as read)" beside an empty Value cell.
+
+    The clearing construct must name the marker. ``clearResults`` already blanks cells with
+    ``cell(name, kind).textContent = ""``, so "an assignment of an empty string happens
+    somewhere in this function" is true whether or not the marker is ever cleared.
     """
     source = script_source(page)
     assert MARKER_RE.search(source) is not None, (
@@ -365,7 +517,10 @@ def test_ac2_marker_is_cleared_between_renders_not_only_set(page: str) -> None:
     body = function_body(source, "clearResults")
     assert body is not None, "no clearResults() function in the page script"
     assert MARKER_CLEAR_RE.search(body) is not None, (
-        "clearResults does not remove the fallback marker, so it survives the next upload"
+        "clearResults does not remove the fallback marker by name, so it survives the next "
+        f'upload. Expected one of removeAttribute("{MARKER_ATTR}"), '
+        'delete <el>.dataset.unconfirmed, or <el>.dataset.unconfirmed = "" in: '
+        f"{body.strip()!r}"
     )
 
 
@@ -382,31 +537,88 @@ def test_ac2_placeholder_path_never_prints_null_or_undefined(scope: str) -> None
 
 
 def test_ac3_confirmed_value_takes_precedence_over_raw(scope: str) -> None:
-    """Happy path: ``value`` is consulted before ``raw`` on the value-cell path.
+    """Happy path: the branch taken when ``value`` is present yields ``value``, never ``raw``.
 
-    Source-level ordering, not a rendered cell: a fallback chain that reached ``raw`` first
-    would show the transcription even for an accepted value.
+    Textual ordering over the whole chunk proved nothing and is gone. The first ``.value`` in
+    ``fillValueCell`` is the presence *test* on the line above the selection, so
+    ``present(field.value) ? field.raw : field.value`` -- precedence flipped, the bug this test
+    is named for -- also has value before raw and passed the old assertion.
+
+    So this reads the one statement that selects the displayed text, splits it into condition,
+    consequent and alternative, resolves the condition back through any local it was named into
+    (``confirmed`` -> ``present(field.value)``) and asserts the branch reached when the value is
+    present is the one carrying ``value``. Still source, not a rendered cell -- a jsdom test is
+    the only thing that proves the DOM -- but it now goes red when the branches swap.
     """
     chunk = raw_chunk(scope)
-    value_match = VALUE_RE.search(chunk)
-    raw_match = RAW_RE.search(chunk)
-    assert value_match is not None, "the value-cell source reads raw but never value"
-    assert raw_match is not None
-    assert value_match.start() < raw_match.start(), (
-        f"raw is consulted before value in: {chunk.strip()!r}"
+
+    selections = []
+    for statement in statements(chunk):
+        if RAW_RE.search(statement) is None:
+            continue
+        ternary = _top_level_ternary(statement)
+        if ternary is not None:
+            selections.append((statement, ternary))
+            continue
+        coalesce = _top_level_coalesce(statement)
+        if coalesce is not None:
+            left, right = coalesce
+            selections.append((statement, (left, left, right)))
+
+    assert selections, (
+        "no statement on the value-cell path picks between value and raw with a ternary or a "
+        "?? / || chain, so this test cannot read which one wins. If the selection was "
+        "refactored into if/else, prove precedence in the jsdom test rather than loosening "
+        f"this one: {chunk.strip()!r}"
     )
+
+    for statement, (condition, consequent, alternative) in selections:
+        condition = inline_locals(chunk, right_of_assignment(condition))
+        assert VALUE_RE.search(condition) is not None, (
+            f"the branch that picks value or raw is not conditioned on value: {statement!r}"
+        )
+        assert RAW_RE.search(condition) is None, (
+            "the branch that picks value or raw is conditioned on raw, so which one wins is "
+            f"not readable from the source; prove it in the jsdom test: {statement!r}"
+        )
+
+        # An odd number of logical ! means the condition reads "value is absent", which puts
+        # the value branch on the other side. Either spelling is fine; swapping is not.
+        value_present, value_absent = consequent, alternative
+        if negations(condition) % 2:
+            value_present, value_absent = alternative, consequent
+
+        assert VALUE_RE.search(value_present) is not None, (
+            f"when the value is present the cell does not show value: {statement!r}"
+        )
+        assert RAW_RE.search(value_present) is None, (
+            f"raw is shown on the branch taken when the value is present: {statement!r}"
+        )
+        assert RAW_RE.search(value_absent) is not None, (
+            f"the branch taken when the value is absent does not fall back to raw: {statement!r}"
+        )
 
 
 def test_ac3_marker_is_applied_conditionally_not_to_every_cell(scope: str) -> None:
-    """Edge: the render source both sets and unsets the marker, so a confirmed cell is clean."""
+    """Edge: the render source both sets and unsets the marker, so a confirmed cell is clean.
+
+    Both halves are required in the same chunk that reads raw: a render that only ever calls
+    ``setAttribute`` leaves a cell flagged from the previous document even when this one's value
+    was accepted. ``toggleAttribute("data-unconfirmed", cond)`` satisfies both, since one call
+    really does do both.
+    """
     assert MARKER_RE.search(scope) is not None, (
         f"the render source has no {MARKER_ATTR} marker at all"
     )  # anchor
 
-    assert MARKER_CLEAR_RE.search(scope) is not None, (
-        "the render source only ever sets the marker; a confirmed value would stay flagged"
+    chunk = raw_chunk(scope)
+    assert MARKER_SET_RE.search(chunk) is not None, (
+        f"the value-cell path never sets the {MARKER_ATTR} marker: {chunk.strip()!r}"
     )
-    assert GUARD_RE.search(scope) is not None
+    assert MARKER_CLEAR_RE.search(chunk) is not None, (
+        "the value-cell path only ever sets the marker; a confirmed value would keep the flag "
+        f"left on the cell by the previous render: {chunk.strip()!r}"
+    )
 
 
 def test_ac3_fallback_does_not_touch_the_status_or_issues_cells(scope: str) -> None:
