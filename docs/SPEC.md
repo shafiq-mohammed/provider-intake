@@ -216,16 +216,18 @@ validity.** `EXTRACTION_PROMPT` asks the model to transcribe what is present and
 authenticity, genuineness or format. When it doubts a legible value it keeps `status: found` and
 records the doubt as a short snake_case issue code beside the value rather than in place of it.
 
-- The four codes above are set by `validate_field` / `validate_result` and are the only ones that
-  carry meaning for our code.
+- The four T-005 codes (`empty_value`, `unknown_state`, `unparseable_date`, `expired`) are set by
+  `validate_field` / `validate_result`. `no_text` (T-004) and `unknown_status` (T-007) are also set
+  and interpreted by our code; everything else in `issues` is advisory.
 - Advisory codes the model invents (`appears_fictional`, `low_contrast`, `handwritten`, …) are
   preserved verbatim, are never interpreted, and never by themselves downgrade a status or null a
   value. Deterministic codes are *appended* to them, never substituted — an expired licence the
   model also doubted reads `["appears_fictional", "expired"]`.
 - `invalid` is reserved for deterministic validation. The prompt tells the model never to return
-  it, and **the prompt is the only mechanism**: `parse_extraction_json` does not rewrite a status
-  the model sends, because coercing one would be our code raising certainty, which A8 forbids. A
-  non-compliant model can still return `invalid`, and that stands.
+  it, and **the prompt is the only mechanism**: `parse_extraction_json` does not rewrite a *valid*
+  status the model sends, because coercing one would be our code raising certainty, which A8
+  forbids. (A status outside the enum is a different case: it becomes `unreadable` +
+  `unknown_status`.) A non-compliant model can still return `invalid`, and that stands.
 
 Why: a novelty document whose licence number read `SARCASM` came back `invalid` with the model's
 own codes, so A8 nulled the value and the field was reported as undeterminable — even though the
