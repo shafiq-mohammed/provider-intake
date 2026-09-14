@@ -699,6 +699,7 @@ def parse_extraction_json(text: str) -> ExtractionResult:
     Top level must be an object, else ExtractorError. For each name in FIELD_NAMES:
       missing or non-object -> FieldResult(status=not_found)
       status not in FieldStatus -> status unreadable, issues + ["unknown_status"]
+        (FieldResult then nulls `value` per A8, so the model's claimed value does not survive)
       value/raw non-string and not None -> str(); issues non-list -> []
     Malformed JSON -> ExtractorError."""
 
