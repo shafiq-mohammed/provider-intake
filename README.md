@@ -193,6 +193,72 @@ Two tests in `tests/test_T-007_anthropic_adapters.py` call the real API and skip
 `ANTHROPIC_API_KEY` is set; the live OCR one also needs a sample document at
 `tests/fixtures/sample_license.png`, which is gitignored because real licences are personal data.
 
+## How this was built
+
+Planned as seven vertical slices, each one shippable on its own. Every slice followed the same
+loop: write the ticket's acceptance criteria as **failing tests first**, implement until green,
+then hand the diff to an independent reviewer with fresh context that re-runs the suite itself.
+
+### The original scope — T-001 to T-007
+
+| Ticket | What it delivered |
+|---|---|
+| **T-001** | App skeleton, settings, the JSON error envelope, health check. Established the rule that bad input is always a 4xx, never a 500. |
+| **T-002** | Upload endpoint with type, size and magic-byte signature validation, and an in-memory repository behind an interface. |
+| **T-003** | Text extraction behind an `OcrEngine` protocol — PDF text layer via pypdf, falling back to OCR when the layer is thin or absent. |
+| **T-004** | LLM field extraction behind a `FieldExtractor` protocol, and the per-field uncertainty model (`FieldResult`, statuses, `missing_fields`). |
+| **T-005** | Deterministic normalization and validation: state names to codes, dates to ISO, expiry checked — and the downgrade-only invariant. |
+| **T-006** | The upload page: file picker, limits stated before you choose, results table. |
+| **T-007** | The real Anthropic adapters, selected by settings, with live tests that skip cleanly without a key. |
+
+### Beyond the original scope
+
+Everything below came from actually *using* the thing, which is where the interesting problems
+were hiding.
+
+**T-008 — the extractor transcribes; judgments became advisory.** I fed it a novelty Dr. House
+prop whose licence number reads `SARCASM`. It came back `status: invalid`, `value: null` — the
+value erased. The issue codes were `not_a_valid_format` and `appears_fictional`, which are not
+codes this system defines. The model had made a validity judgment the spec never asked for, and
+the root cause was a sentence *we* had written into the prompt, offering it `invalid` as an
+option. Now the model transcribes and records doubts as advisory issue codes; deciding validity
+is deterministic code's job. The licence number comes back `SARCASM`, `found`, with
+`appears_fictional` sitting beside it.
+
+**T-009 — the results table falls back to `raw`.** Because `value` is nulled for anything that
+does not validate, an expired licence displayed as a dash — the date was in the payload but
+invisible. The cell now falls back to the document's own text, marked `data-unconfirmed` and
+styled so nobody mistakes a transcription for an accepted value.
+
+### Bugs caught along the way
+
+**A real security bug, found in review, fixed test-first.** FastAPI's validation errors carry the
+rejected input, and the 422 handler passed it through verbatim — so an upload that failed
+validation **echoed the document's own bytes back to the client**. A 500 KB upload produced a
+500 KB error response containing it. The spec itself had mandated the passthrough, so the spec was
+corrected in the same PR. Five regression tests were committed *failing* first.
+
+**A test suite that silently started billing.** Wiring `.env` support into `app.main` looked
+harmless — until the test count shifted from 238/2 to 239/1. Importing the module was injecting a
+real API key into the environment and un-skipping the live tests, so a plain `pytest` run made
+paid API calls. Moved to a dedicated `app.asgi` entrypoint; `app.main` imports clean again.
+
+**Tests that couldn't fail.** A reviewer ran mutation testing on the final slice: seven one-line
+mutations of the page, five caught, **two survived** — including a test that passed with the
+exact line it was named for deleted. Both were strengthened until mutating the implementation
+made them red.
+
+**Invariants hardened rather than assumed.** `FieldResult` was frozen so a value cannot be
+attached to an uncertain field after construction. `.env`, `.env.*` and `tests/fixtures/` were
+gitignored before a real credential document could ever reach a public remote.
+
+### What I'd do next
+
+The honest gap: the page's JavaScript is verified by hand, not in CI. I drove it through a real
+DOM several times — upload flow, client-side size guard, HTML escaping with `<img onerror>`
+payloads, the `raw` fallback — and it all works, but none of that is automated. A headless-browser
+test is the single highest-value thing left.
+
 ## Known limitations
 
 - The upload limit is 10 MB but the Anthropic API caps images at 5 MB, so a file in between is
@@ -202,3 +268,13 @@ Two tests in `tests/test_T-007_anthropic_adapters.py` call the real API and skip
 - The page's JavaScript is verified by hand, not in CI.
 - Not implemented, by design: authentication, persistence, batch uploads, a human review queue,
   retries and rate limiting.
+
+---
+
+## Thank you
+
+Thank you for taking the time to review this. I had a great deal of fun building it — far more
+than I expected to — and I kept going well past "it works" because every time I ran a real
+document through it, something interesting turned up.
+
+— **Shafiq**
