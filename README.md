@@ -1,77 +1,170 @@
 # Provider Document Intake
 
-A behavioral health provider uploads a credential document (jpg, png or pdf, max 10 MB). The
-service extracts the raw text, asks an LLM to map it onto four fields, validates and normalizes
-that answer deterministically, and shows what was found — and what could not be reliably
-determined, and why.
+A small FastAPI service that reads a healthcare provider's credential document — a medical
+licence, usually a photo or a scan — and pulls four fields out of it: **provider name, licence
+number, issuing state, expiration date.**
 
-![The UI after extracting a real licence: four fields with value, status and issues, plus the missing-fields line](docs/images/ui-extraction.png)
+The interesting part is not the extraction. It is what the service does when it *isn't sure*.
 
-That screenshot is a real end-to-end run against the Anthropic API — vision OCR, then field
-extraction, then deterministic validation. Note the `inferred_from_address` issue on the state
-row: the model reported that itself, and issue strings it invents are preserved rather than
-discarded, alongside the four codes the validator sets.
+![The UI after extracting a licence: four fields with value, status and issues, plus the missing-fields line](docs/images/ui-extraction.png)
 
-## Quickstart
+## The problem this solves
+
+Credentialing teams receive licence documents as phone photos, scans and PDFs, and someone has to
+type the details into a system. An LLM can read them — but an LLM will also confidently return a
+date it half-guessed, or a licence number it inferred from a watermark. For credentialing, a
+confident wrong answer is worse than no answer, because nobody knows to check it.
+
+So every field comes back with a **status**, not just a value:
+
+| status | meaning |
+|---|---|
+| `found` | read from the document and usable |
+| `not_found` | the field is not in the document |
+| `unreadable` | it is there but illegible — blurred, cropped, obscured |
+| `invalid` | read correctly, but it does not pass validation (expired, unparseable date, unknown state) |
+
+Plus `issues`, a list of short codes explaining *why*, and `missing_fields`, listing everything
+that is not `found`. A human reviewer reads that list instead of re-checking all four fields.
+
+Two rules hold throughout, and they are what make the output trustworthy:
+
+- **`value` is `null` unless `status` is `found`.** A value attached to an uncertain field is
+  dropped, never returned. The model cannot put a half-guess on the wire.
+- **Validation may only lower confidence, never raise it.** The LLM's answer is untrusted input.
+  Deterministic code afterwards can turn `found` into `invalid`, but nothing can promote a field
+  the model was unsure about.
+
+An expired licence therefore reads correctly and is still not usable — `status: invalid`, issue
+`expired`, with the original date visible in `raw` so a human can see what the document said.
+
+## Quick start
+
+**Requirements:** Python 3.11+. [uv](https://docs.astral.sh/uv/) is preferred; pip works.
 
 ```bash
-uv pip install -e '.[dev]'      # or: pip install -e '.[dev]'
-python -m pytest -q             # 239 passed, 1 skipped
-PYTHONPATH=src uvicorn app.main:app --reload
+git clone https://github.com/shafiq-mohammed/provider-intake.git
+cd provider-intake
+
+uv venv && source .venv/bin/activate      # or: python -m venv .venv && source .venv/bin/activate
+uv pip install -e '.[dev]'                # or: pip install -e '.[dev]'
+
+python -m pytest -q                       # should pass, with no API key and no network
+uvicorn app.asgi:app --reload
 ```
 
-Open http://127.0.0.1:8000 and upload a document. With no configuration the service runs **fully
-offline** against in-memory fakes — no API key, no network. That is the default, and the entire
-test suite runs that way.
+Open **http://127.0.0.1:8000**, choose a jpg, png or pdf, and press *Upload and extract*.
 
-To use real Claude for OCR and extraction:
+**No API key is needed to run this.** By default both the OCR and the extraction step use built-in
+fakes, so the service starts, the page works and the whole test suite passes fully offline. That
+is deliberate — the LLM sits behind a protocol precisely so nothing depends on a network call.
+What you will see with the fakes is the plumbing, not real extraction: every field comes back
+`not_found` with the issue `no_text`.
+
+To read real documents, add a key.
+
+## Adding your Anthropic API key
+
+Get one from [console.anthropic.com](https://console.anthropic.com) — it is pay-as-you-go and
+separate from a Claude.ai subscription. A few dollars covers a lot of documents; each one is two
+API calls.
+
+**Create a `.env` in the project root:**
 
 ```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env     # gitignored; see docs/ENVIRONMENT.md
-APP_OCR_BACKEND=anthropic APP_EXTRACTOR_BACKEND=anthropic \
-  PYTHONPATH=src uvicorn app.main:app --reload
+ANTHROPIC_API_KEY=sk-ant-api03-...
+APP_OCR_BACKEND=anthropic
+APP_EXTRACTOR_BACKEND=anthropic
 ```
 
-Unset those two variables to go back to the fakes. No code change — that is the point of the
-protocol boundary.
+Then `uvicorn app.asgi:app --reload` and upload a real licence.
 
-## How uncertainty is represented
+Things worth knowing:
 
-Every field is a `FieldResult`, never a bare value:
+- **`.env` is gitignored, and so is `tests/fixtures/`.** Never commit a key, and never commit a
+  real credential document — it is someone's personal data.
+- **Only `app.asgi` reads `.env`.** `app.main` deliberately does not, because the test suite
+  imports it and importing it must never pull a key into the environment — otherwise `pytest`
+  starts making billed API calls. If you prefer environment variables to a file, export them in
+  your shell instead and run either entrypoint.
+- **Quote the value if you export it in a shell.** An unquoted `export ANTHROPIC_API_KEY=sk-ant-...`
+  truncates at the first shell metacharacter and gives you a baffling `401 API key is invalid`.
+- **Use `~/.zshenv`, not `~/.zshrc`,** if you want it available to scripts and tooling — `.zshrc`
+  is only read by interactive shells.
+- **Turn it off** by deleting the two `APP_*_BACKEND` lines. The fakes take over; no code changes.
+
+Full variable reference: [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md).
+
+## Using it
+
+Upload a document and you get a table: one row per field, showing the value, its status, and any
+issues. Below it, the list of fields that could not be reliably determined.
+
+The same thing over HTTP:
+
+```bash
+curl -F 'file=@licence.png' http://127.0.0.1:8000/documents
+# -> {"id": "…", "filename": "licence.png", "content_type": "image/png", "size_bytes": 374558}
+
+curl -X POST http://127.0.0.1:8000/documents/<id>/extract
+```
 
 ```json
 {
-  "state":           {"value": "MD", "status": "found",   "raw": "Maryland", "issues": ["inferred_from_address"]},
-  "expiration_date": {"value": null, "status": "invalid", "raw": "01/31/2020", "issues": ["expired"]},
+  "document_id": "…",
+  "text_source": "ocr",
+  "provider_name":   {"value": "Nelson Malone", "status": "found",   "raw": "Nelson Malone", "issues": []},
+  "license_number":  {"value": "MEDTEST8159",   "status": "found",   "raw": "MEDTEST8159",   "issues": []},
+  "state":           {"value": "MD",            "status": "found",   "raw": "Baltimore, MD", "issues": ["inferred_from_address"]},
+  "expiration_date": {"value": null,            "status": "invalid", "raw": "06-11-2015",    "issues": ["expired"]},
   "missing_fields":  ["expiration_date"]
 }
 ```
 
-`status` is one of `found` / `not_found` / `unreadable` / `invalid`. Two rules hold throughout:
+`inferred_from_address` there is a code the *model* produced, not one of ours — it read the state
+off an address rather than an explicit issuer line and said so. Advisory codes like that are
+preserved as-is; only the deterministic ones (`empty_value`, `unknown_state`, `unparseable_date`,
+`expired`) are set by our validation, and only those change a field's status.
 
-- **`value` is `null` unless `status` is `found`.** A value attached to an uncertain field is
-  dropped, never returned. `FieldResult` is frozen and enforces this at construction.
-- **Validation may only downgrade certainty, never raise it.** The LLM's output is untrusted
-  input; deterministic post-processing can turn `found` into `invalid`, but nothing can promote a
-  field the model was unsure about. Tested over the full status × field × value cross product.
+## Endpoints
 
-So an expired licence reads correctly but is not usable: `invalid`, issue `expired`, `value` null,
-with the original date still visible in `raw`.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | the upload page |
+| GET | `/config` | upload limits, so the page can state them before you choose a file |
+| POST | `/documents` | upload; validates type, size and file signature |
+| GET | `/documents/{id}` | metadata |
+| POST | `/documents/{id}/text` | raw text — PDF text layer, or OCR |
+| POST | `/documents/{id}/extract` | the four fields, validated |
+| GET | `/healthz` | liveness |
 
-## Pipeline
+Errors always return `{"error": {"code", "message", "details"}}` with a 4xx status — never a 500
+for bad input. Document contents never appear in a response body, an error detail, or a log.
+
+## How it works
 
 ```
-POST /documents        upload, validate type/size/signature, store in memory
-POST /documents/{id}/text     pypdf text layer, falling back to OCR when thin or absent
-POST /documents/{id}/extract  OCR -> LLM extraction -> deterministic validation
-GET  /                 the upload page
-GET  /config           limits, so the page can state them before you choose a file
+upload ──► validate type/size/signature ──► store in memory
+                                              │
+                    ┌─────────────────────────┘
+                    ▼
+        PDF with a text layer? ── yes ──► pypdf, no API call
+                    │
+                    no
+                    ▼
+            OCR (Claude vision, or a fake)
+                    ▼
+        LLM extracts the four fields  ── untrusted output
+                    ▼
+        deterministic validation  ── state names → codes, dates → ISO,
+                                     expiry checked, confidence only lowered
+                    ▼
+                 response
 ```
 
-Both the OCR engine and the field extractor sit behind protocols with fakes, so the whole flow
-runs without network access or an API key. Errors return a JSON envelope with a 4xx status —
-never a 500 for bad input — and document contents never appear in a response body, an error
-detail, or a log.
+Both the OCR engine and the field extractor sit behind protocols with fake implementations, which
+is why the entire suite runs without a network or a key. Storage is in-memory behind an interface
+— there is no database, and documents do not survive a restart.
 
 ## Layout
 
@@ -82,29 +175,30 @@ detail, or a log.
 | `docs/SPEC.md` | architecture, conventions, and the interface for every ticket |
 | `docs/ENVIRONMENT.md` | every environment variable, and where to put your key |
 | `tasks/T-00X.md` | one ticket per vertical slice |
-| `.claude/`, `scripts/` | the agentic delivery pipeline itself |
+| `.claude/`, `scripts/` | the agentic delivery pipeline used to build this |
 
 ## Development
 
 Built ticket by ticket through a test-first pipeline: plan → failing tests → implementation →
-independent review → PR. Tests are derived from each ticket's acceptance criteria and committed
-failing, before the implementation exists.
+independent review → PR. Tests come from each ticket's acceptance criteria and are committed
+*failing*, before the implementation exists. Hooks lint every edit and run the suite before any
+agent can call itself done.
 
 ```bash
-python -m pytest -q          # tests
-ruff check .                 # lint
+python -m pytest -q     # tests
+ruff check .            # lint
 ```
 
-The two live tests in `tests/test_T-007_anthropic_adapters.py` skip unless `ANTHROPIC_API_KEY` is
-set, and the live OCR test additionally needs a sample document at
-`tests/fixtures/sample_license.png` (gitignored — real credential documents must not be committed).
+Two tests in `tests/test_T-007_anthropic_adapters.py` call the real API and skip unless
+`ANTHROPIC_API_KEY` is set; the live OCR one also needs a sample document at
+`tests/fixtures/sample_license.png`, which is gitignored because real licences are personal data.
 
 ## Known limitations
 
 - The upload limit is 10 MB but the Anthropic API caps images at 5 MB, so a file in between is
   accepted and then fails as a 422 `ocr_failed`.
 - Extraction errors report only the exception class name, so an operator cannot tell an auth
-  failure from a rate limit without inspecting `__cause__`.
+  failure from a rate limit without inspecting the cause.
 - The page's JavaScript is verified by hand, not in CI.
 - Not implemented, by design: authentication, persistence, batch uploads, a human review queue,
   retries and rate limiting.
