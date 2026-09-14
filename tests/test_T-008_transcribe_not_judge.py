@@ -107,6 +107,18 @@ RESERVATION_WORDS = (
     "only set by",
 )
 VALIDATOR_WORDS = ("deterministic", "validation", "validator", "validate")
+INFERENCE_WORDS = ("infer", "deduc", "derive", "read it off", "work it out", "read from an")
+FALLBACK_WORDS = (
+    "outright",
+    "explicit",
+    "stating",
+    "stated",
+    "printed",
+    "not given",
+    "does not say",
+    "spell",
+    "without",
+)
 
 # --------------------------------------------------------------------------- input factories
 
@@ -248,6 +260,35 @@ def test_ac1_prompt_does_not_tell_the_model_to_mark_documents_invalid() -> None:
 
     assert offenders == [], (
         f"the prompt still offers 'invalid' to the model without reserving it: {offenders}"
+    )
+
+
+def test_ac1_prompt_allows_state_inferred_from_an_address() -> None:
+    """Extends AC1 at the user's instruction: infer the state when none is printed explicitly.
+
+    The ticket's five ACs do not mention address inference; this instruction arrived mid-ticket.
+    ``tasks/T-008.md`` and ``docs/SPEC.md`` need a matching acceptance criterion -- the test is
+    here so the behaviour is pinned, but the ticket is the record and it is currently silent.
+
+    Inference is the model's job, not the validator's: ``normalize_state`` reads a code or a
+    full state name, never an address line (see the AC3 tests). So the prompt must tell the
+    model to put the inferred code in ``value``, keep the address in ``raw``, stay ``found``,
+    and record that the value was inferred rather than read.
+    """
+    prompt = prompt_text()
+    address_segments = [seg for seg in prompt_segments() if "address" in seg]
+
+    assert "address" in prompt, "the prompt never mentions inferring the state from an address"
+    assert any(mentions(seg, INFERENCE_WORDS) for seg in address_segments), (
+        "no sentence tells the model it may infer a field from the address"
+    )
+    assert any("issue" in seg or "inferred" in seg for seg in address_segments), (
+        "the prompt does not require the inference to be recorded as an issue code"
+    )
+    # Inference is a fallback, not the first move: a state the document states outright wins.
+    # Checked inside the address sentence, because "stat" also matches "status" elsewhere.
+    assert any(mentions(seg, FALLBACK_WORDS) for seg in address_segments), (
+        "the prompt does not say inference is for when the document does not state the value"
     )
 
 
@@ -500,6 +541,10 @@ def test_ac4_endpoint_returns_the_transcribed_value_and_both_issue_kinds(
     assert body["expiration_date"]["raw"] == "06-11-2015"
     assert body["expiration_date"]["issues"] == ["appears_fictional", "expired"]
     assert body["missing_fields"] == ["expiration_date"]
+    # The expired date is not thrown away: it stays on the wire in ``raw``, next to an explicit
+    # "expired" issue code. ``value`` is null because A8 forbids a value on a non-found field
+    # (models.FieldResult), which is why the date is readable in ``raw`` and nowhere else.
+    assert "06-11-2015" in response.text
 
 
 # --------------------------------------------------------------------------- AC5
