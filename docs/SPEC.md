@@ -211,6 +211,27 @@ Field-level issue codes (the `issues` list on a `FieldResult`):
 
 The LLM may also return arbitrary issue strings; they are preserved as-is and appended to.
 
+**Division of labour (T-008): the model transcribes and observes; deterministic validation decides
+validity.** `EXTRACTION_PROMPT` asks the model to transcribe what is present and *not* to judge
+authenticity, genuineness or format. When it doubts a legible value it keeps `status: found` and
+records the doubt as a short snake_case issue code beside the value rather than in place of it.
+
+- The four codes above are set by `validate_field` / `validate_result` and are the only ones that
+  carry meaning for our code.
+- Advisory codes the model invents (`appears_fictional`, `low_contrast`, `handwritten`, …) are
+  preserved verbatim, are never interpreted, and never by themselves downgrade a status or null a
+  value. Deterministic codes are *appended* to them, never substituted — an expired licence the
+  model also doubted reads `["appears_fictional", "expired"]`.
+- `invalid` is reserved for deterministic validation. The prompt tells the model never to return
+  it, and **the prompt is the only mechanism**: `parse_extraction_json` does not rewrite a status
+  the model sends, because coercing one would be our code raising certainty, which A8 forbids. A
+  non-compliant model can still return `invalid`, and that stands.
+
+Why: a novelty document whose licence number read `SARCASM` came back `invalid` with the model's
+own codes, so A8 nulled the value and the field was reported as undeterminable — even though the
+text had been read correctly and our validator, which has no licence-number format rules (A12),
+would have passed it through. Transcription and judgment are now separated.
+
 ## 10. Testing conventions
 
 - One file per ticket: `tests/test_T-00X_<slug>.py`. Test names `test_ac<N>_<what>`.
