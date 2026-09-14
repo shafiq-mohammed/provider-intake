@@ -36,17 +36,33 @@ EXTRACTION_PROMPT = (
     "license_number (the licence or certificate number), "
     "state (the issuing US state), "
     "expiration_date (the licence expiration date). "
-    "Reply with a single JSON object and nothing else: no prose, no explanation. Its keys are "
-    "the four field names above, and each value is an object with the keys "
+    "Your job is to transcribe what the document says, not to judge it. "
+    "Do not decide whether the document is authentic or genuine, whether a value is plausible, "
+    "or whether it matches the format you would expect -- a value you can read is a value you "
+    "report, as written. "
+    "Reply with a single JSON object and nothing else: no prose, no explanation. "
+    "Its keys are the four field names above, and each value is an object with the keys "
     "{value, status, raw, issues}. "
-    '"value" is the normalized value as a string, or null when there is none. '
-    '"status" is one of "found" (a value you read with confidence), '
-    '"not_found" (the field is absent from the text), '
-    '"unreadable" (the field is present but you cannot read it), or '
-    '"invalid" (you read it but it is not a usable value). '
-    '"raw" is the exact substring you read it from, or null. '
-    '"issues" is a list of short snake_case strings describing any problem, or an empty list. '
-    "Never guess: a field you cannot read is not_found or unreadable, not found. "
+    '"value" is the value as it appears, with surrounding labels and whitespace trimmed, or '
+    "null when there is none. "
+    '"status" is one of "found" (the field is in the text and you could read it), '
+    '"not_found" (the field is absent from the text), or '
+    '"unreadable" (the field is present but you cannot read it, for example because it is '
+    "illegible, obscured or cut off). "
+    '"raw" is the exact substring you read the value from, or null. '
+    '"issues" is a list of short snake_case strings, or an empty list -- use it to record any '
+    "concern you have about the field, for example appears_fictional, not_a_standard_format, "
+    "low_contrast or handwritten. "
+    'Whenever the text is legible, keep the status "found" and put the doubt in "issues": a '
+    "value that looks suspicious, fictional or oddly formatted is still found, with your "
+    "concern named beside it rather than in place of it. "
+    'Never return the status "invalid" -- it is reserved for the deterministic validation that '
+    "runs after you and alone decides whether a value is usable. "
+    "Never invent a value: a field you cannot read is unreadable and a field the text gives you "
+    "nothing for is not_found; neither is found. "
+    "If the text supports a field without stating it outright (for example the issuing state "
+    'read from an address on the document), report it as found, put the supporting text in "raw" '
+    'and name how you got it in "issues", for example inferred_from_address. '
     "The document text follows."
 )
 
